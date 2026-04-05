@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MLS Throw-in Origin-Destination Map</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:         #0f1117;
+    --surface:    #181c27;
+    --border:     #2a2f3d;
+    --text:       #e8eaf0;
+    --muted:      #6b7280;
+    --accent:     #4ade80;
+    --accent-dim: #1a3d28;
+    --pitch-fill: #1a2e1a;
+    --pitch-line: #2d4d2d;
+    --origin-idle:   rgba(255,255,255,0.08);
+    --origin-hover:  rgba(74,222,128,0.25);
+    --origin-active: rgba(74,222,128,0.55);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem 3rem;
+  }
+
+  header {
+    width: 100%;
+    max-width: 780px;
+    margin-bottom: 1.75rem;
+  }
+
+  header h1 {
+    font-size: 1.35rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+
+  header p {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-top: 0.35rem;
+    line-height: 1.5;
+  }
+
+  .controls {
+    width: 100%;
+    max-width: 780px;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .controls label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+  }
+
+  .controls select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .controls select:hover,
+  .controls select:focus {
+    border-color: var(--accent);
+  }
+
+  .viz-wrapper {
+    width: 100%;
+    max-width: 780px;
+    position: relative;
+  }
+
+  #pitch-svg {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 8px;
+    overflow: visible;
+  }
+
+  /* origin zone rects drawn by D3 */
+  .origin-zone {
+    fill: var(--origin-idle);
+    stroke: none;
+    cursor: pointer;
+    transition: fill 0.15s;
+  }
+  .origin-zone:hover  { fill: var(--origin-hover); }
+  .origin-zone.active { fill: var(--origin-active); }
+
+  /* Observable Plot container sits on top of SVG */
+  #plot-overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #plot-overlay svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  #legend-svg {
+    width: 100%;
+    max-width: 780px;
+    margin-top: 0.6rem;
+    display: block;
+    overflow: visible;
+  }
+
+  footer {
+    margin-top: 1.2rem;
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  footer .instructions {
+    font-weight: 700;
+    color: var(--muted);
+  }
+
+  footer .source {
+    font-weight: 400;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MLS Throw-in Origin-Destination Map</h1>
+  <p>Click an origin zone (highlighted band along each touchline) to see where throws from that zone tend to land. The color scale changes when you select a different metric, and you can see the specific values for any tile by hovering over it. The data is based on all MLS throw-ins from 2013 through 2025.</p>
+</header>
+
+<div class="controls">
+  <label for="var-select">Metric</label>
+  <select id="var-select"></select>
+</div>
+
+<div class="viz-wrapper">
+  <svg id="pitch-svg" viewBox="0 0 780 520" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="plot-overlay"></div>
+</div>
+
+<svg id="legend-svg" viewBox="0 0 780 60" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<footer>
+  <span class="instructions">click an origin zone along the touchline to filter · hover tiles for values</span>
+  <span class="source">source: american soccer analysis</span>
+  <span class="source">viz by ben bellman and claude</span>
+</footer>
+
+<script>
+// ─── CONFIGURATION ────────────────────────────────────────────────────────────
+// Replace these paths once you know where your JSON files will live.
+const PATHS = {
+  outcomes: "throw_outcomes.json",   // keyed by origin_zone_id
+  zones:    "origin_zones.json",
+  meta:     "variable_meta.json"
+};
+
+const DEFAULT_ZONE = 1;   // zone pre-selected on load
+const CELL_SIZE    = 5;   // must match what you used in R
+
+// ─── PITCH GEOMETRY ───────────────────────────────────────────────────────────
+// The SVG viewBox is 780 × 520. MARGIN leaves room outside the pitch lines
+// for the origin zone bands (top/bottom) and a small gutter (left/right).
+const ZONE_BAND  = 12;  // px height of origin zone strip outside touchline
+const MARGIN = { top: ZONE_BAND + 8, right: 20, bottom: ZONE_BAND + 8, left: 20 };
+const PW = 780 - MARGIN.left - MARGIN.right;  // pixel width of pitch
+const PH = 520 - MARGIN.top  - MARGIN.bottom; // pixel height of pitch
+
+// Scales: pitch coords (0–100) → SVG pixels
+const scX = d => MARGIN.left + (d / 100) * PW;
+const scY = d => MARGIN.top  + (d / 100) * PH;
+const pxW = CELL_SIZE / 100 * PW;  // pixel width of one tile
+const pxH = CELL_SIZE / 100 * PH;  // pixel height of one tile
+
+// ─── PLACEHOLDER DATA (replace by loading your JSON files) ────────────────────
+// Shape of variable_meta: [{key, label, scheme, breaks}, ...]
+// Shape of origin_zones:  [{origin_zone_id, x_center, y_center, side}, ...]
+// Shape of throw_outcomes: {"1": [{dest_x, dest_y, n, var1, var2, var3}], "2": [...], ...}
+
+const PLACEHOLDER_META = [
+  { key: "var1", label: "Carry Distance",      scheme: "YlOrRd", breaks: [0, 5, 10, 20, 35, 55, 80] },
+  { key: "var2", label: "Shot Probability",     scheme: "Blues",  breaks: [0, 0.02, 0.05, 0.1, 0.18, 0.28, 0.4] },
+  { key: "var3", label: "Pass Completion %",    scheme: "Greens", breaks: [0, 0.4, 0.55, 0.65, 0.73, 0.82, 0.92] }
+];
+
+// Generate placeholder origin zones (20 per side, x_center at 2.5, 7.5, …, 97.5)
+// left  touchline = y_center 100 (zones 21–40) → bottom of screen
+// right touchline = y_center 0   (zones 1–20)  → top of screen
+const PLACEHOLDER_ZONES = [];
+for (let i = 0; i < 20; i++) {
+  const xc = i * 5 + 2.5;
+  PLACEHOLDER_ZONES.push({ origin_zone_id: i + 1,  x_center: xc, y_center: 0,   side: "right" });
+  PLACEHOLDER_ZONES.push({ origin_zone_id: i + 21, x_center: xc, y_center: 100, side: "left"  });
+}
+
+// Generate placeholder outcome rows for every zone
+function makePlaceholderOutcomes() {
+  const obj = {};
+  for (let z = 1; z <= 40; z++) {
+    const rows = [];
+    for (let xi = 0; xi < 20; xi++) {
+      for (let yi = 0; yi < 20; yi++) {
+        if (Math.random() < 0.3) {
+          rows.push({
+            dest_x: xi * 5 + 2.5,
+            dest_y: yi * 5 + 2.5,
+            n:    Math.floor(Math.random() * 30) + 1,
+            var1: Math.random() * 80,
+            var2: Math.random() * 0.4,
+            var3: 0.3 + Math.random() * 0.65
+          });
+        }
+      }
+    }
+    obj[z] = rows;
+  }
+  return obj;
+}
+const PLACEHOLDER_OUTCOMES = makePlaceholderOutcomes();
+
+// ─── STATE ────────────────────────────────────────────────────────────────────
+let allMeta, allZones, allOutcomes;
+let activeZone = DEFAULT_ZONE;
+let activeVarKey;
+let globalMaxN = 1;  // computed once across all zones at init
+
+// ─── LOAD DATA ────────────────────────────────────────────────────────────────
+// When your JSON files are ready, swap the Promise.resolve() calls below
+// with d3.json(PATHS.xxx) calls:
+
+   Promise.all([
+     d3.json(PATHS.meta),
+     d3.json(PATHS.zones),
+     d3.json(PATHS.outcomes)
+   ]).then(([meta, zones, outcomes]) => init(meta, zones, outcomes));
+
+//Promise.all([
+//  Promise.resolve(PLACEHOLDER_META),
+//  Promise.resolve(PLACEHOLDER_ZONES),
+//  Promise.resolve(PLACEHOLDER_OUTCOMES)
+//]).then(([meta, zones, outcomes]) => init(meta, zones, outcomes));
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+function init(meta, zones, outcomes) {
+  // Defensively flatten meta in case write_json wrapped each element in an array
+  allMeta      = meta.map(m => Array.isArray(m) ? m[0] : m);
+  allZones     = zones;
+  allOutcomes  = outcomes;
+  activeVarKey = allMeta[0].key;
+
+  // compute global max n_per_match once so tile size is consistent across zones
+  globalMaxN = d3.max(
+    Object.values(outcomes).flat(),
+    d => d.n
+  ) || 1;
+
+  buildDropdown();
+  drawPitch();
+  drawOriginZones();
+  selectZone(DEFAULT_ZONE);
+}
+
+// ─── DROPDOWN ─────────────────────────────────────────────────────────────────
+function buildDropdown() {
+  const sel = document.getElementById("var-select");
+  allMeta.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.key;
+    opt.textContent = m.label;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener("change", e => {
+    activeVarKey = e.target.value;
+    console.log("dropdown changed to:", activeVarKey);
+    console.log("allMeta keys:", allMeta.map(m => m.key));
+    console.log("match found:", allMeta.find(m => m.key === activeVarKey));
+    renderHeatmap();
+  });
+}
+
+// ─── PITCH (D3 SVG) ───────────────────────────────────────────────────────────
+// Coordinate space: 100×100 units mapping to a 120yd × 80yd pitch.
+// Conversions: 1 x-unit = 1.2yd, 1 y-unit = 0.8yd
+// To place a feature N yards from a reference: N_units = N / 1.2 (x) or N / 0.8 (y)
+// Because x and y scales differ, yard-circles become pixel-ellipses.
+// Helper: pixel radius for a yard radius on each axis.
+const yrToUx = yd => yd / 1.2;   // yards → x pitch units
+const yrToUy = yd => yd / 0.8;   // yards → y pitch units
+const pxRx   = yd => yrToUx(yd) / 100 * PW;  // yards → pixel rx
+const pxRy   = yd => yrToUy(yd) / 100 * PH;  // yards → pixel ry
+
+function drawPitch() {
+  const svg = d3.select("#pitch-svg");
+
+  // pitch background
+  svg.append("rect")
+    .attr("x", MARGIN.left).attr("y", MARGIN.top)
+    .attr("width", PW).attr("height", PH)
+    .attr("fill", "#1a2e1a").attr("fill-opacity", 0.75).attr("rx", 4);
+
+  const line = (x1, y1, x2, y2) =>
+    svg.append("line")
+      .attr("x1", scX(x1)).attr("y1", scY(y1))
+      .attr("x2", scX(x2)).attr("y2", scY(y2))
+      .attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+
+  // touchlines & goal lines
+  line(0, 0, 100, 0); line(0, 100, 100, 100);
+  line(0, 0, 0, 100); line(100, 0, 100, 100);
+
+  // halfway line
+  line(50, 0, 50, 100);
+
+  // ── centre circle: 10yd radius → ellipse in pixel space ──
+  svg.append("ellipse")
+    .attr("cx", scX(50)).attr("cy", scY(50))
+    .attr("rx", pxRx(10)).attr("ry", pxRy(10))
+    .attr("fill", "none").attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+
+  // centre spot
+  svg.append("circle")
+    .attr("cx", scX(50)).attr("cy", scY(50))
+    .attr("r", 2.5).attr("fill", "#2d4d2d");
+
+  // ── penalty areas: 18yd deep × 44yd wide (22yd each side of centre) ──
+  const paDepth = yrToUx(18);         // 15.0 units
+  const paHalf  = yrToUy(22);         // 27.5 units
+  // left PA
+  svg.append("rect")
+    .attr("x", scX(0)).attr("y", scY(50 - paHalf))
+    .attr("width",  scX(paDepth) - scX(0))
+    .attr("height", scY(50 + paHalf) - scY(50 - paHalf))
+    .attr("fill", "none").attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+  // right PA
+  svg.append("rect")
+    .attr("x", scX(100 - paDepth)).attr("y", scY(50 - paHalf))
+    .attr("width",  scX(100) - scX(100 - paDepth))
+    .attr("height", scY(50 + paHalf) - scY(50 - paHalf))
+    .attr("fill", "none").attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+
+  // ── 6-yard boxes: 6yd deep × 20yd wide (10yd each side of centre) ──
+  const sixDepth = yrToUx(6);          // 5.0 units
+  const sixHalf  = yrToUy(10);         // 12.5 units
+  svg.append("rect")
+    .attr("x", scX(0)).attr("y", scY(50 - sixHalf))
+    .attr("width",  scX(sixDepth) - scX(0))
+    .attr("height", scY(50 + sixHalf) - scY(50 - sixHalf))
+    .attr("fill", "none").attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+  svg.append("rect")
+    .attr("x", scX(100 - sixDepth)).attr("y", scY(50 - sixHalf))
+    .attr("width",  scX(100) - scX(100 - sixDepth))
+    .attr("height", scY(50 + sixHalf) - scY(50 - sixHalf))
+    .attr("fill", "none").attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+
+  // ── penalty spots: 12yd from goal line ──
+  const spotDepth = yrToUx(12);        // 10.0 units
+  [[spotDepth, 50], [100 - spotDepth, 50]].forEach(([sx, sy]) => {
+    svg.append("circle")
+      .attr("cx", scX(sx)).attr("cy", scY(sy))
+      .attr("r", 2.5).attr("fill", "#2d4d2d");
+  });
+
+  // ── penalty arcs: 10yd radius circle centred on spot, portion outside 18yd box ──
+  // Because x/y scales differ we parametrise the ellipse and find the
+  // parameter t where the ellipse crosses the penalty area edge, then draw
+  // the arc between those two t values using a polyline approximation.
+  const arcYds  = 10;                   // arc radius in yards
+  const arcRx   = pxRx(arcYds);        // pixel rx
+  const arcRy   = pxRy(arcYds);        // pixel ry
+  const arcSegs = 64;                   // polyline resolution
+
+  function penaltyArcPoints(spotXu, paEdgeXu, outsideDir) {
+    // outsideDir: +1 means arc portion with x > paEdgeXu (left goal),
+    //             -1 means arc portion with x < paEdgeXu (right goal)
+    const pts = [];
+    for (let i = 0; i <= arcSegs; i++) {
+      const t  = (i / arcSegs) * 2 * Math.PI;
+      const xu = spotXu + yrToUx(arcYds) * Math.cos(t);
+      const yu = 50      + yrToUy(arcYds) * Math.sin(t);
+      // keep only points outside the penalty area
+      if (outsideDir > 0 ? xu >= paEdgeXu : xu <= paEdgeXu) {
+        pts.push([scX(xu), scY(yu)]);
+      }
+    }
+    return pts;
+  }
+
+  function drawArc(pts) {
+    if (pts.length < 2) return;
+    // split into contiguous runs (arc may wrap around and gap in the middle)
+    const runs = [];
+    let run = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const dx = pts[i][0] - pts[i-1][0];
+      const dy = pts[i][1] - pts[i-1][1];
+      if (Math.sqrt(dx*dx + dy*dy) > pxRx(arcYds) * 0.3) {
+        runs.push(run); run = [];
+      }
+      run.push(pts[i]);
+    }
+    runs.push(run);
+    runs.forEach(r => {
+      if (r.length < 2) return;
+      svg.append("polyline")
+        .attr("points", r.map(p => p.join(",")).join(" "))
+        .attr("fill", "none").attr("stroke", "#2d4d2d").attr("stroke-width", 1.5);
+    });
+  }
+
+  // left arc: spot at (spotDepth, 50), portion outside x > paDepth
+  drawArc(penaltyArcPoints(spotDepth, paDepth, +1));
+  // right arc: spot at (100-spotDepth, 50), portion outside x < (100-paDepth)
+  drawArc(penaltyArcPoints(100 - spotDepth, 100 - paDepth, -1));
+
+  // group for origin zones (drawn on top of pitch lines)
+  svg.append("g").attr("id", "origin-zones-g");
+
+  // group for heatmap tiles (on top of zones)
+  svg.append("g").attr("id", "heatmap-g");
+}
+
+// ─── ORIGIN ZONES (D3) ────────────────────────────────────────────────────────
+function drawOriginZones() {
+  const g = d3.select("#origin-zones-g");
+
+  g.selectAll("rect.origin-zone")
+    .data(allZones)
+    .join("rect")
+      .attr("class", "origin-zone")
+      .attr("id", d => `zone-${d.origin_zone_id}`)
+      .attr("x", d => scX(d.x_center) - pxW / 2)
+      // Right (y=0)   → band sits ABOVE the top touchline
+      // Left  (y=100) → band sits BELOW the bottom touchline
+      .attr("y", d => d.side === "Right"
+        ? scY(0) - ZONE_BAND    // just outside top edge
+        : scY(100))              // just outside bottom edge
+      .attr("width",  pxW)
+      .attr("height", ZONE_BAND)
+      .attr("rx", 2)
+      .on("click", (event, d) => selectZone(d.origin_zone_id));
+}
+
+// ─── ZONE SELECTION ───────────────────────────────────────────────────────────
+function selectZone(zoneId) {
+  activeZone = zoneId;
+
+  // update active class
+  d3.selectAll(".origin-zone").classed("active", false);
+  d3.select(`#zone-${zoneId}`).classed("active", true);
+
+  renderHeatmap();
+}
+
+// ─── HEATMAP (D3 rects with threshold color scale) ────────────────────────────
+function renderHeatmap() {
+  const rows = allOutcomes[activeZone] || [];
+  const meta = allMeta.find(m => m.key === activeVarKey);
+  const breaks = meta.breaks;
+
+  // Build a D3 threshold color scale from the R-computed breaks + scheme name.
+  // Two scheme families are supported:
+  //   Categorical (e.g. "YlOrRd", "Blues"): d3.schemeXxx objects keyed by bin count 3–9
+  //   Continuous  (e.g. "viridis", "cubehelix"): d3.interpolateXxx functions, any bin count
+
+  const categoricalSchemes = {
+    YlOrRd: d3.schemeYlOrRd,
+    Blues:  d3.schemeBlues,
+    Greens: d3.schemeGreens,
+    Reds:   d3.schemeReds,
+    RdBu:   d3.schemeRdBu,
+    YlGnBu: d3.schemeYlGnBu,
+    OrRd:   d3.schemeOrRd,
+    PuBuGn: d3.schemePuBuGn,
+    RdYlBu: d3.schemeRdYlBu
+  };
+
+  const continuousInterpolators = {
+    viridis:   d3.interpolateViridis,
+    inferno:   d3.interpolateInferno,
+    magma:     d3.interpolateMagma,
+    plasma:    d3.interpolatePlasma,
+    cividis:   d3.interpolateCividis,
+    cubehelix: d3.interpolateCubehelixDefault,
+    warm:      d3.interpolateWarm,
+    cool:      d3.interpolateCool,
+    turbo:     d3.interpolateTurbo
+  };
+
+  const nBins  = breaks.length - 1;
+  const domain = breaks.slice(1, -1);   // interior breaks for threshold scale
+  const dMin   = breaks[0];
+  const dMax   = breaks[breaks.length - 1];
+  let colorScale;
+
+  if (categoricalSchemes[meta.scheme]) {
+    const binCount = Math.min(Math.max(nBins, 3), 9);
+    const colors   = categoricalSchemes[meta.scheme][binCount];
+    colorScale = d3.scaleThreshold().domain(domain).range(colors);
+
+  } else if (continuousInterpolators[meta.scheme]) {
+    const interp  = continuousInterpolators[meta.scheme];
+    // sample one color per bin from the interpolator, evenly spaced in [0,1]
+    const colors  = d3.range(nBins).map(i => interp((i + 0.5) / nBins));
+    colorScale = d3.scaleThreshold().domain(domain).range(colors);
+
+  } else {
+    console.warn(`Unknown scheme "${meta.scheme}", falling back to YlOrRd`);
+    const binCount = Math.min(Math.max(nBins, 3), 9);
+    const colors   = d3.schemeYlOrRd[binCount] || d3.schemeYlOrRd[6];
+    colorScale = d3.scaleThreshold().domain(domain).range(colors);
+  }
+
+  // size scale: uses globalMaxN so tile size is consistent across all zones
+  const sizeScale = d3.scaleSqrt().domain([0, globalMaxN]).range([0, 1]);
+
+  // draw tiles
+  const g = d3.select("#heatmap-g");
+  g.selectAll("rect.tile").remove();
+  g.selectAll("text.coord-label").remove();
+
+  g.selectAll("rect.tile")
+    .data(rows)
+    .join("rect")
+      .attr("class", "tile")
+      .attr("x", d => {
+        const frac = sizeScale(d.n);
+        return scX(d.dest_x) - (pxW * frac) / 2;
+      })
+      .attr("y", d => {
+        const frac = sizeScale(d.n);
+        return scY(d.dest_y) - (pxH * frac) / 2;
+      })
+      .attr("width",  d => pxW * sizeScale(d.n))
+      .attr("height", d => pxH * sizeScale(d.n))
+      .attr("fill",   d => colorScale(d[activeVarKey]))
+      .attr("opacity", 0.88)
+      .attr("rx", 2)
+      .append("title")
+        .text(d => `Throws in Dataset: ${d.n}\n${meta.label}: ${d[activeVarKey].toFixed(3)}`);
+
+  updateLegend(colorScale, breaks, meta);
+}
+
+// ─── LEGEND (SVG) ─────────────────────────────────────────────────────────────
+function updateLegend(colorScale, breaks, meta) {
+  const svg  = d3.select("#legend-svg");
+  svg.selectAll("*").remove();
+
+  const LW   = 780;
+  const barH = 12;
+  const barX = 30;
+  const barW = LW - barX - 30;
+  const barY = 22;
+  const domain = [breaks[0], breaks[breaks.length - 1]];
+  const span   = domain[1] - domain[0];
+  const nBins  = breaks.length - 1;
+
+  // ── discrete color blocks — width proportional to bin interval ──
+  for (let i = 0; i < nBins; i++) {
+    const midVal = (breaks[i] + breaks[i + 1]) / 2;
+    const bx = barX + ((breaks[i]     - domain[0]) / span) * barW;
+    const bw =        ((breaks[i + 1] - breaks[i]) / span) * barW;
+    svg.append("rect")
+      .attr("x", bx).attr("y", barY)
+      .attr("width", bw).attr("height", barH)
+      .attr("fill", colorScale(midVal));
+  }
+
+  breaks.forEach(b => {
+    const tx = barX + ((b - domain[0]) / span) * barW;
+
+    svg.append("line")
+      .attr("x1", tx).attr("x2", tx)
+      .attr("y1", barY + barH).attr("y2", barY + barH + 4)
+      .attr("stroke", "#6b7280").attr("stroke-width", 1);
+
+    const label = Number.isInteger(b) ? String(b) : b.toFixed(3);
+    svg.append("text")
+      .attr("x", tx).attr("y", barY + barH + 14)
+      .attr("text-anchor", "middle")
+      .attr("font-family", "DM Mono, monospace")
+      .attr("font-size", "9")
+      .attr("fill", "#6b7280")
+      .text(label);
+  });
+
+  // ── attacking direction arrow + label (muted gray, quarter-width centred) ──
+  const arrowY      = 9;
+  const arrowMid    = barX + barW / 2;
+  const arrowHalf   = barW / 8;          // half of quarter-length
+  const arrowX1     = arrowMid - arrowHalf;
+  const arrowX2     = arrowMid + arrowHalf;
+
+  svg.append("line")
+    .attr("x1", arrowX1).attr("x2", arrowX2 - 8)
+    .attr("y1", arrowY).attr("y2", arrowY)
+    .attr("stroke", "#6b7280").attr("stroke-width", 1.5)
+    .attr("stroke-dasharray", "4 3");
+
+  svg.append("polygon")
+    .attr("points", `${arrowX2},${arrowY} ${arrowX2-8},${arrowY-4} ${arrowX2-8},${arrowY+4}`)
+    .attr("fill", "#6b7280");
+
+  svg.append("text")
+    .attr("x", (arrowX1 + arrowX2) / 2)
+    .attr("y", arrowY - 3)
+    .attr("text-anchor", "middle")
+    .attr("font-family", "DM Mono, monospace")
+    .attr("font-size", "9")
+    .attr("letter-spacing", "0.08em")
+    .attr("fill", "#6b7280")
+    .text("ATTACKING DIRECTION");
+}
+</script>
+</body>
+</html>
